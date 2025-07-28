@@ -2,37 +2,56 @@
 const JoinRequest = require('../models/JoinRequest');
 const User = require('../models/User');
 const Space = require('../models/Space');
+const {
+  validateUserHasInviteCode,
+  validateTargetUserCanBeInvited,
+  validateUserHasNoSpace,
+  validateUserHasNoPendingRequest,
+  validateRequestCanBeOperated,
+  validateUsersCanAcceptInvite
+} = require('../utils/validators');
 
 // 发起邀请（已验证用户身份）
 exports.sendRequest = async (req, res) => {
   try {
     const { toInviteCode, message, spaceName, fromUserName } = req.body;
-    const fromUser = req.user;
 
     if (!toInviteCode || !message || !spaceName || !fromUserName) {
       return res.status(400).json({ error: '参数不完整' });
     }
 
-    const toUser = await User.findOne({ inviteCode: toInviteCode });
-    if (!toUser) return res.status(404).json({ error: '目标用户不存在' });
+    const fromUserId = req.user.userId;
 
-    const existing = await JoinRequest.findOne({
-      fromUserId: fromUser.userId,
-      status: 'pending',
-    });
-    if (existing) return res.status(409).json({ error: '你已发送过请求，请等待回应' });
+    // 验证用户是否有邀请码
+    const inviteCodeValidation = await validateUserHasInviteCode(fromUserId);
+    if (!inviteCodeValidation.valid) {
+      return res.status(403).json({ error: inviteCodeValidation.error });
+    }
 
-    const fromSpace = await Space.findOne({ 'members.uid': fromUser.userId });
-    if (fromSpace) return res.status(403).json({ error: '你已在一个空间中，不能发起新邀请' });
+    // 验证目标用户是否存在且可被邀请
+    const targetValidation = await validateTargetUserCanBeInvited(toInviteCode, fromUserId);
+    if (!targetValidation.valid) {
+      return res.status(404).json({ error: targetValidation.error });
+    }
 
-    const toSpace = await Space.findOne({ 'members.uid': toUser.userId });
-    if (toSpace) return res.status(403).json({ error: '对方已经在空间中，不能被邀请' });
+    // 验证用户是否已有空间
+    const spaceValidation = await validateUserHasNoSpace(fromUserId);
+    if (!spaceValidation.valid) {
+      return res.status(403).json({ error: spaceValidation.error });
+    }
 
+    // 验证用户是否有待处理的邀请
+    const pendingValidation = await validateUserHasNoPendingRequest(fromUserId);
+    if (!pendingValidation.valid) {
+      return res.status(409).json({ error: pendingValidation.error });
+    }
+
+    // 所有验证通过，创建邀请
     const request = await JoinRequest.create({
-      fromUserId: fromUser.userId,
-      toUserId: toUser.userId,
-      fromInviteCode: fromUser.inviteCode,
-      toInviteCode: toInviteCode, // ✅ 存储目标门牌号
+      fromUserId: fromUserId,
+      toUserId: targetValidation.user.userId,
+      fromInviteCode: inviteCodeValidation.user.inviteCode,
+      toInviteCode: toInviteCode,
       fromUserName,
       message,
       spaceName
@@ -78,16 +97,11 @@ exports.getSentRequestFromUser = async (req, res) => {
 // 获取请求详情（用于轮询状态，必须是相关用户）
 exports.getRequestById = async (req, res) => {
   try {
-    const request = await JoinRequest.findById(req.params.id);
-    if (!request) return res.status(404).json({ error: '请求不存在' });
-
-    const currentUser = req.user.userId;
-    const isRelated =
-      request.fromUserId === currentUser || request.toUserId === currentUser;
-    if (!isRelated) {
-      return res.status(403).json({ error: '你无权查看该请求' });
+    const requestValidation = await validateRequestCanBeOperated(req.params.id, req.user.userId, 'view');
+    if (!requestValidation.valid) {
+      return res.status(404).json({ error: requestValidation.error });
     }
-    res.json({ request });
+    res.json({ request: requestValidation.request });
   } catch (err) {
     console.error('获取请求详情失败:', err);
     res.status(500).json({ error: '服务器错误' });
@@ -101,24 +115,25 @@ exports.acceptRequest = async (req, res) => {
     const { toUserName } = req.body;
     const currentUser = req.user;
 
-    const request = await JoinRequest.findById(id);
-    if (!request || request.status !== 'pending') {
-      return res.status(400).json({ error: '无效或已处理的请求' });
+    // 验证请求是否存在且可接受
+    const requestValidation = await validateRequestCanBeOperated(id, currentUser.userId, 'accept');
+    if (!requestValidation.valid) {
+      return res.status(400).json({ error: requestValidation.error });
     }
 
-    if (request.toUserId !== currentUser.userId) {
-      return res.status(403).json({ error: '你不能接受这个邀请' });
+    const request = requestValidation.request;
+
+    // 验证双方是否可以接受邀请
+    const acceptValidation = await validateUsersCanAcceptInvite(request.fromUserId, request.toUserId);
+    if (!acceptValidation.valid) {
+      return res.status(403).json({ error: acceptValidation.error });
     }
 
-    const fromInSpace = await Space.findOne({ 'members.uid': request.fromUserId });
-    const toInSpace = await Space.findOne({ 'members.uid': request.toUserId });
-    if (fromInSpace || toInSpace) {
-      return res.status(403).json({ error: '一方已经在空间中，无法接受' });
-    }
-
+    // 更新请求状态
     request.status = 'accepted';
     await request.save();
-    // ✅ 清理冲突请求
+
+    // 清理冲突请求
     await JoinRequest.updateMany(
       {
         status: 'pending',
@@ -136,6 +151,8 @@ exports.acceptRequest = async (req, res) => {
       },
       { $set: { status: 'cancelled' } }
     );
+
+    // 创建新空间
     const newSpace = await Space.create({
       spaceName: request.spaceName,
       members: [
@@ -157,15 +174,12 @@ exports.rejectRequest = async (req, res) => {
     const { id } = req.params;
     const currentUser = req.user;
 
-    const request = await JoinRequest.findById(id);
-    if (!request || request.status !== 'pending') {
-      return res.status(400).json({ error: '无效或已处理的请求' });
+    const requestValidation = await validateRequestCanBeOperated(id, currentUser.userId, 'reject');
+    if (!requestValidation.valid) {
+      return res.status(400).json({ error: requestValidation.error });
     }
 
-    if (request.toUserId !== currentUser.userId) {
-      return res.status(403).json({ error: '你不能拒绝这个邀请' });
-    }
-
+    const request = requestValidation.request;
     request.status = 'rejected';
     await request.save();
 
@@ -182,20 +196,12 @@ exports.cancelRequest = async (req, res) => {
     const { id } = req.params;
     const currentUser = req.user;
 
-    const request = await JoinRequest.findById(id);
-    if (!request) {
-      return res.status(404).json({ error: '请求不存在' });
+    const requestValidation = await validateRequestCanBeOperated(id, currentUser.userId, 'cancel');
+    if (!requestValidation.valid) {
+      return res.status(404).json({ error: requestValidation.error });
     }
 
-    if (request.fromUserId !== currentUser.userId) {
-      return res.status(403).json({ error: '你无权取消这个邀请' });
-    }
-
-    if (request.status !== 'pending') {
-      return res.status(400).json({ error: '无法取消：请求已被处理' });
-    }
-
-    await request.deleteOne();
+    await requestValidation.request.deleteOne();
 
     res.json({ message: '请求已取消' });
   } catch (err) {
