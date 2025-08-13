@@ -46,12 +46,15 @@ io.use((socket, next) => {
 // 🔥 挂载 socket 功能模块
 require('./socket/spaceSocket')(io);
 require('./socket/catSocket')(io);
+require('./socket/requestSocket')(io);
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
     console.log('✅ MongoDB connected');
-    server.listen(process.env.PORT || 5000, () =>
-      console.log('🚀 Server with Socket.io running')
+    server.listen(process.env.PORT || 5000, () => {
+      const port = process.env.PORT || 5000;
+      console.log(`🚀 Server with Socket.io running on port ${port}`)
+      }
     );
   })
   .catch((err) => console.error(err));

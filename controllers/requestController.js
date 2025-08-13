@@ -57,6 +57,14 @@ exports.sendRequest = async (req, res) => {
       spaceName
     });
 
+    // socket 推送给接收方
+    try {
+      const io = req.app.get('io');
+      io.to(String(request.toUserId)).emit('request:new', { request });
+    } catch (e) {
+      console.log('emit request:new error', e?.message);
+    }
+
     res.status(201).json(request);
   } catch (err) {
     console.error('发送邀请失败:', err);
@@ -161,6 +169,15 @@ exports.acceptRequest = async (req, res) => {
       ],
     });
 
+    // socket 推送：给双方更新状态（对方的 pending 列表减少；发起人被告知 accepted）
+    try {
+      const io = req.app.get('io');
+      io.to(String(request.fromUserId)).emit('request:accepted', { id: String(request._id) });
+      io.to(String(request.toUserId)).emit('request:consumed', { id: String(request._id) });
+    } catch (e) {
+      console.log('emit request accepted error', e?.message);
+    }
+
     res.json({ message: '请求已接受，空间已创建' });
   } catch (err) {
     console.error('接受邀请失败:', err);
@@ -183,6 +200,15 @@ exports.rejectRequest = async (req, res) => {
     request.status = 'rejected';
     await request.save();
 
+    // 推送给发起人：被拒绝
+    try {
+      const io = req.app.get('io');
+      io.to(String(request.fromUserId)).emit('request:rejected', { id: String(request._id) });
+      io.to(String(request.toUserId)).emit('request:consumed', { id: String(request._id) });
+    } catch (e) {
+      console.log('emit request rejected error', e?.message);
+    }
+
     res.json({ message: '请求已拒绝' });
   } catch (err) {
     console.error('拒绝邀请失败:', err);
@@ -202,6 +228,14 @@ exports.cancelRequest = async (req, res) => {
     }
 
     await requestValidation.request.deleteOne();
+
+    // 推送给接收方：该 pending 被取消
+    try {
+      const io = req.app.get('io');
+      io.to(String(requestValidation.request.toUserId)).emit('request:cancelled', { id: String(requestValidation.request._id) });
+    } catch (e) {
+      console.log('emit request cancelled error', e?.message);
+    }
 
     res.json({ message: '请求已取消' });
   } catch (err) {
