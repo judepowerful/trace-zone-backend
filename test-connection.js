@@ -12,7 +12,7 @@ async function testConnection() {
     console.log('\n💡 解决方案:');
     console.log('1. 在项目根目录创建 .env 文件');
     console.log('2. 添加以下内容:');
-    console.log('   MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/database_name?retryWrites=true&w=majority');
+    console.log('   MONGO_URI=XXX');
     console.log('3. 将 username, password, cluster, database_name 替换为你的实际值');
     return;
   }
